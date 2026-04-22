@@ -376,10 +376,8 @@ pub fn setup_document_styles(docx: Docx, config: &Config, css_rules: Option<&Css
         if let Some(after_pt) = config.spacing.after {
             ls = ls.after(pt_to_twip(after_pt) as u32);
         }
-        body_text_style.paragraph_property = body_text_style
-            .paragraph_property
-            .clone()
-            .line_spacing(ls);
+        body_text_style.paragraph_property =
+            body_text_style.paragraph_property.clone().line_spacing(ls);
     }
 
     // --- 箇条書き用 Numbering 定義 (abstractNumId=9, numId=3) ---
@@ -443,8 +441,8 @@ pub fn setup_document_styles(docx: Docx, config: &Config, css_rules: Option<&Css
     if let Some(css) = css_rules {
         for (class_name, css_style) in &css.classes {
             let style_id = format!("css-{}", class_name);
-            let mut style = Style::new(&style_id, StyleType::Character)
-                .name(&format!("CSS: {}", class_name));
+            let mut style =
+                Style::new(&style_id, StyleType::Character).name(&format!("CSS: {}", class_name));
 
             if let Some(ref color) = css_style.color {
                 style = style.color(color);
@@ -519,7 +517,11 @@ fn apply_css_to_heading(style: &mut Style, css: Option<&CssStyle>, _selector: &s
         style.paragraph_property = style
             .paragraph_property
             .clone()
-            .line_spacing(LineSpacing::new().line(spacing).line_rule(LineSpacingType::Exact))
+            .line_spacing(
+                LineSpacing::new()
+                    .line(spacing)
+                    .line_rule(LineSpacingType::Exact),
+            )
             .text_alignment(TextAlignmentType::Center);
     }
     if let Some(ref color) = css.background_color {
@@ -574,7 +576,7 @@ mod tests {
     #[test]
     fn heading_styles_include_spacing_for_levels_one_and_two() {
         let xml = String::from_utf8(
-            setup_document_styles(Docx::new(), &Config::default())
+            setup_document_styles(Docx::new(), &Config::default(), None)
                 .build()
                 .styles,
         )
