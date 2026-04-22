@@ -1,8 +1,11 @@
+use anyhow::{Result, bail};
 use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
 use crate::ir::{Alignment, Block, Inline, ListItem};
 
-pub fn parse_markdown(input: &str) -> Vec<Block> {
+const PAGE_BREAK_DIRECTIVE: &str = r"\pagebreak";
+
+pub fn parse_markdown(input: &str) -> Result<Vec<Block>> {
     let preprocessed = preprocess_div_tags(input);
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
@@ -14,7 +17,9 @@ pub fn parse_markdown(input: &str) -> Vec<Block> {
     let events: Vec<Event> = parser.collect();
 
     let converter = EventConverter::new();
-    converter.convert(&events)
+    let blocks = converter.convert(&events);
+    validate_page_break_usage(&blocks)?;
+    Ok(blocks)
 }
 
 /// <div class="..."> と </div> の後に空行がない場合、空行を挿入する。
@@ -39,8 +44,7 @@ fn preprocess_div_tags(input: &str) -> String {
                         result.push_str("\n\n");
                     }
                     result.push_str("</div>\n");
-                    let next_is_blank =
-                        i + 1 >= lines.len() || lines[i + 1].trim().is_empty();
+                    let next_is_blank = i + 1 >= lines.len() || lines[i + 1].trim().is_empty();
                     if !next_is_blank {
                         result.push('\n');
                     }
@@ -51,11 +55,9 @@ fn preprocess_div_tags(input: &str) -> String {
 
         result.push_str(line);
         result.push('\n');
-        let is_div_tag =
-            extract_div_class(trimmed).is_some() || trimmed.starts_with("</div>");
+        let is_div_tag = extract_div_class(trimmed).is_some() || trimmed.starts_with("</div>");
         if is_div_tag {
-            let next_is_blank =
-                i + 1 >= lines.len() || lines[i + 1].trim().is_empty();
+            let next_is_blank = i + 1 >= lines.len() || lines[i + 1].trim().is_empty();
             if !next_is_blank {
                 result.push('\n');
             }
@@ -242,11 +244,7 @@ impl EventConverter {
                 self.current_code_lang = match kind {
                     pulldown_cmark::CodeBlockKind::Fenced(lang) => {
                         let l = lang.to_string();
-                        if l.is_empty() {
-                            None
-                        } else {
-                            Some(l)
-                        }
+                        if l.is_empty() { None } else { Some(l) }
                     }
                     pulldown_cmark::CodeBlockKind::Indented => None,
                 };
@@ -272,7 +270,9 @@ impl EventConverter {
             }
             TagEnd::Paragraph => {
                 let content = self.inline_stack.pop().unwrap_or_default();
-                if !content.is_empty() {
+                if is_page_break_paragraph(&content) {
+                    self.add_block(Block::PageBreak);
+                } else if !content.is_empty() {
                     self.add_block(Block::Paragraph { content });
                 }
             }
@@ -335,11 +335,11 @@ impl EventConverter {
                 }
             }
             TagEnd::TableRow => {
-                if let Some(ref mut state) = self.table_state {
-                    if !state.in_header {
-                        let row = std::mem::take(&mut state.current_row);
-                        state.rows.push(row);
-                    }
+                if let Some(ref mut state) = self.table_state
+                    && !state.in_header
+                {
+                    let row = std::mem::take(&mut state.current_row);
+                    state.rows.push(row);
                 }
             }
             TagEnd::TableCell => {
@@ -473,6 +473,98 @@ fn extract_div_class(html: &str) -> Option<String> {
     Some(class_name)
 }
 
+fn is_page_break_paragraph(content: &[Inline]) -> bool {
+    matches!(content, [Inline::Text(text)] if text.trim() == PAGE_BREAK_DIRECTIVE)
+}
+
+fn validate_page_break_usage(blocks: &[Block]) -> Result<()> {
+    for block in blocks {
+        validate_block(block)?;
+    }
+    Ok(())
+}
+
+fn validate_block(block: &Block) -> Result<()> {
+    match block {
+        Block::Heading { content, .. } | Block::Paragraph { content } => {
+            validate_inlines(content)?;
+        }
+        Block::BulletList { items } | Block::OrderedList { items, .. } => {
+            for item in items {
+                validate_inlines(&item.content)?;
+                for child in &item.children {
+                    validate_block(child)?;
+                }
+            }
+        }
+        Block::Table { headers, rows, .. } => {
+            for cell in headers.iter().flatten() {
+                validate_inline(cell)?;
+            }
+            for row in rows {
+                for cell in row {
+                    validate_inlines(cell)?;
+                }
+            }
+        }
+        Block::CodeBlock { code, .. } => {
+            ensure_no_page_break_directive(code)?;
+        }
+        Block::Image { alt, .. } => {
+            ensure_no_page_break_directive(alt)?;
+        }
+        Block::BlockQuote { children } => {
+            for child in children {
+                validate_block(child)?;
+            }
+        }
+        Block::PageBreak | Block::ThematicBreak => {}
+        Block::StyledDiv { class, children } => {
+            ensure_no_page_break_directive(class)?;
+            for child in children {
+                validate_block(child)?;
+            }
+        }
+        Block::DisplayMath(text) => ensure_no_page_break_directive(text)?,
+    }
+    Ok(())
+}
+
+fn validate_inlines(inlines: &[Inline]) -> Result<()> {
+    for inline in inlines {
+        validate_inline(inline)?;
+    }
+    Ok(())
+}
+
+fn validate_inline(inline: &Inline) -> Result<()> {
+    match inline {
+        Inline::Text(text) | Inline::Code(text) => ensure_no_page_break_directive(text)?,
+        Inline::Bold(children) | Inline::Italic(children) => validate_inlines(children)?,
+        Inline::Link { text, url } => {
+            validate_inlines(text)?;
+            ensure_no_page_break_directive(url)?;
+        }
+        Inline::SoftBreak | Inline::HardBreak => {}
+        Inline::StyledSpan { class, children } => {
+            ensure_no_page_break_directive(class)?;
+            validate_inlines(children)?;
+        }
+        Inline::InlineMath(text) => ensure_no_page_break_directive(text)?,
+    }
+    Ok(())
+}
+
+fn ensure_no_page_break_directive(text: &str) -> Result<()> {
+    if text.contains(PAGE_BREAK_DIRECTIVE) {
+        bail!(
+            "`{}`は段落単位で単独指定した場合のみ利用できます",
+            PAGE_BREAK_DIRECTIVE
+        );
+    }
+    Ok(())
+}
+
 fn heading_level_to_u8(level: &HeadingLevel) -> u8 {
     match level {
         HeadingLevel::H1 => 1,
@@ -490,7 +582,7 @@ mod tests {
 
     #[test]
     fn preserves_link_url_in_inline_ir() {
-        let blocks = parse_markdown("[Rust](https://www.rust-lang.org/)");
+        let blocks = parse_markdown("[Rust](https://www.rust-lang.org/)").unwrap();
         assert_eq!(blocks.len(), 1);
 
         match &blocks[0] {
@@ -508,12 +600,14 @@ mod tests {
 
     #[test]
     fn parses_span_class_to_styled_span() {
-        let blocks = parse_markdown("text <span class=\"warning\">important</span> end");
+        let blocks = parse_markdown("text <span class=\"warning\">important</span> end").unwrap();
         assert_eq!(blocks.len(), 1);
 
         match &blocks[0] {
             Block::Paragraph { content } => {
-                let span = content.iter().find(|i| matches!(i, Inline::StyledSpan { .. }));
+                let span = content
+                    .iter()
+                    .find(|i| matches!(i, Inline::StyledSpan { .. }));
                 assert!(span.is_some(), "StyledSpan should be found");
                 match span.unwrap() {
                     Inline::StyledSpan { class, children } => {
@@ -559,7 +653,7 @@ mod tests {
     #[test]
     fn parses_div_block_to_styled_div() {
         let md = "<div class=\"todo\">\n\nSome text.\n\n</div>\n";
-        let blocks = parse_markdown(md);
+        let blocks = parse_markdown(md).unwrap();
         assert_eq!(blocks.len(), 1);
 
         match &blocks[0] {
@@ -580,7 +674,7 @@ mod tests {
     #[test]
     fn parses_blockquote() {
         let md = "> Quoted text.\n";
-        let blocks = parse_markdown(md);
+        let blocks = parse_markdown(md).unwrap();
         assert_eq!(blocks.len(), 1);
 
         match &blocks[0] {
@@ -588,9 +682,7 @@ mod tests {
                 assert_eq!(children.len(), 1);
                 match &children[0] {
                     Block::Paragraph { content } => {
-                        assert!(
-                            matches!(&content[0], Inline::Text(t) if t == "Quoted text.")
-                        );
+                        assert!(matches!(&content[0], Inline::Text(t) if t == "Quoted text."));
                     }
                     other => panic!("unexpected child: {other:?}"),
                 }
@@ -602,7 +694,7 @@ mod tests {
     #[test]
     fn parses_nested_blockquote() {
         let md = "> outer\n>\n> > inner\n";
-        let blocks = parse_markdown(md);
+        let blocks = parse_markdown(md).unwrap();
         assert_eq!(blocks.len(), 1);
 
         match &blocks[0] {
@@ -630,7 +722,7 @@ mod tests {
 
     #[test]
     fn does_not_mix_urls_between_multiple_links() {
-        let blocks = parse_markdown("[A](https://a.example) [B](https://b.example)");
+        let blocks = parse_markdown("[A](https://a.example) [B](https://b.example)").unwrap();
         assert_eq!(blocks.len(), 1);
 
         match &blocks[0] {
@@ -657,7 +749,7 @@ mod tests {
     #[test]
     fn single_line_div_does_not_swallow_following_content() {
         let md = "# Before\n\n<div class=\"todo\">TODO: text</div>\nAfter div.\n\n## Also after\n";
-        let blocks = parse_markdown(md);
+        let blocks = parse_markdown(md).unwrap();
         assert!(blocks.len() >= 3, "got {} blocks: {blocks:?}", blocks.len());
         assert!(matches!(&blocks[0], Block::Heading { level: 1, .. }));
         assert!(matches!(&blocks[1], Block::StyledDiv { .. }));
@@ -669,7 +761,7 @@ mod tests {
     #[test]
     fn div_followed_by_content_without_blank_line() {
         let md = "<div class=\"todo\">\n\nTODO item.\n\n</div>\nAfter div.\n";
-        let blocks = parse_markdown(md);
+        let blocks = parse_markdown(md).unwrap();
         assert_eq!(blocks.len(), 2, "should have StyledDiv + Paragraph");
         assert!(matches!(&blocks[0], Block::StyledDiv { .. }));
         assert!(matches!(&blocks[1], Block::Paragraph { .. }));
@@ -677,13 +769,11 @@ mod tests {
 
     #[test]
     fn parses_inline_math() {
-        let blocks = parse_markdown("The equation $x^2$ is simple.");
+        let blocks = parse_markdown("The equation $x^2$ is simple.").unwrap();
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             Block::Paragraph { content } => {
-                let math = content
-                    .iter()
-                    .find(|i| matches!(i, Inline::InlineMath(_)));
+                let math = content.iter().find(|i| matches!(i, Inline::InlineMath(_)));
                 assert!(math.is_some(), "InlineMath should be found");
                 match math.unwrap() {
                     Inline::InlineMath(s) => assert_eq!(s, "x^2"),
@@ -696,7 +786,7 @@ mod tests {
 
     #[test]
     fn parses_display_math() {
-        let blocks = parse_markdown("$$\\frac{a}{b}$$\n");
+        let blocks = parse_markdown("$$\\frac{a}{b}$$\n").unwrap();
         assert_eq!(blocks.len(), 1);
         match &blocks[0] {
             Block::DisplayMath(s) => assert_eq!(s, "\\frac{a}{b}"),
@@ -707,9 +797,26 @@ mod tests {
     #[test]
     fn div_with_content_after_blank_line_still_works() {
         let md = "<div class=\"todo\">\n\nTODO item.\n\n</div>\n\nAfter div.\n";
-        let blocks = parse_markdown(md);
+        let blocks = parse_markdown(md).unwrap();
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], Block::StyledDiv { .. }));
         assert!(matches!(&blocks[1], Block::Paragraph { .. }));
+    }
+
+    #[test]
+    fn parses_page_break_directive_as_dedicated_block() {
+        let blocks = parse_markdown("\\pagebreak").unwrap();
+        assert_eq!(blocks.len(), 1);
+        assert!(matches!(blocks[0], Block::PageBreak));
+    }
+
+    #[test]
+    fn rejects_page_break_directive_inside_regular_paragraph() {
+        let error = parse_markdown("before \\pagebreak after").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains(r"`\pagebreak`は段落単位で単独指定した場合のみ利用できます")
+        );
     }
 }

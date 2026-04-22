@@ -91,6 +91,7 @@ impl<'a> ConvertContext<'a> {
     fn convert_block(&mut self, docx: Docx, block: &Block) -> Result<Docx> {
         match block {
             Block::Heading { level, content } => Ok(self.convert_heading(docx, *level, content)),
+            Block::PageBreak => Ok(self.convert_page_break(docx)),
             Block::Paragraph { content } => Ok(self.convert_paragraph(docx, content)),
             Block::BulletList { items } => self.convert_bullet_list(docx, items, 0),
             Block::OrderedList { items, start } => {
@@ -147,8 +148,8 @@ impl<'a> ConvertContext<'a> {
                     }
                     Err(_) => {
                         // フォールバック: LaTeX をテキスト出力
-                        let para = Paragraph::new()
-                            .add_run(self.make_body_run(&format!("$${latex}$$")));
+                        let para =
+                            Paragraph::new().add_run(self.make_body_run(&format!("$${latex}$$")));
                         Ok(docx.add_paragraph(para))
                     }
                 }
@@ -177,8 +178,7 @@ impl<'a> ConvertContext<'a> {
             for i in before_count..after_count {
                 if let Some(DocumentChild::Paragraph(para)) = d.document.children.get(i) {
                     let new_para = apply_css_to_paragraph(*para.clone(), css);
-                    d.document.children[i] =
-                        DocumentChild::Paragraph(Box::new(new_para));
+                    d.document.children[i] = DocumentChild::Paragraph(Box::new(new_para));
                 }
             }
         }
@@ -316,11 +316,7 @@ impl<'a> ConvertContext<'a> {
             }
             Inline::Link { text, url } => {
                 let label: String = text.iter().map(|child| child.to_plain_text()).collect();
-                let display = if label.is_empty() {
-                    url.clone()
-                } else {
-                    label
-                };
+                let display = if label.is_empty() { url.clone() } else { label };
                 let processed = process_text(&display);
                 let mut run = Run::new().add_text(&processed);
                 if bold {
@@ -363,15 +359,18 @@ impl<'a> ConvertContext<'a> {
                 }
                 p
             }
-            Inline::InlineMath(latex) => {
-                match crate::math::latex_to_omml(latex, false) {
-                    Ok(omml) => para.add_math(MathXml::new(omml)),
-                    Err(_) => para.add_run(self.make_body_run(&format!("${latex}$"))),
-                }
-            }
+            Inline::InlineMath(latex) => match crate::math::latex_to_omml(latex, false) {
+                Ok(omml) => para.add_math(MathXml::new(omml)),
+                Err(_) => para.add_run(self.make_body_run(&format!("${latex}$"))),
+            },
             Inline::SoftBreak => para.add_run(Run::new().add_text(" ")),
             Inline::HardBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
         }
+    }
+
+    fn convert_page_break(&self, docx: Docx) -> Docx {
+        let para = Paragraph::new().add_run(Run::new().add_break(BreakType::Page));
+        docx.add_paragraph(para)
     }
 
     /// 図番号文字列を生成（chapter: "1.2", sequential: "2"）
@@ -503,12 +502,10 @@ impl<'a> ConvertContext<'a> {
                 }
                 p
             }
-            Inline::InlineMath(latex) => {
-                match crate::math::latex_to_omml(latex, false) {
-                    Ok(omml) => para.add_math(MathXml::new(omml)),
-                    Err(_) => para.add_run(self.make_body_run(&format!("${latex}$"))),
-                }
-            }
+            Inline::InlineMath(latex) => match crate::math::latex_to_omml(latex, false) {
+                Ok(omml) => para.add_math(MathXml::new(omml)),
+                Err(_) => para.add_run(self.make_body_run(&format!("${latex}$"))),
+            },
             Inline::SoftBreak => para.add_run(self.make_body_run(" ")),
             Inline::HardBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
         }
@@ -703,8 +700,7 @@ impl<'a> ConvertContext<'a> {
                         .into_iter()
                         .map(|child| match child {
                             ParagraphChild::Run(mut run) => {
-                                run.run_property.color =
-                                    Some(Color::new(color));
+                                run.run_property.color = Some(Color::new(color));
                                 ParagraphChild::Run(run)
                             }
                             other => other,
@@ -773,9 +769,7 @@ impl<'a> ConvertContext<'a> {
         let font_family = css_code
             .and_then(|c| c.font_family.as_deref())
             .unwrap_or("Courier New");
-        let font_size_pt = css_code
-            .and_then(|c| c.font_size_pt)
-            .unwrap_or(9.0);
+        let font_size_pt = css_code.and_then(|c| c.font_size_pt).unwrap_or(9.0);
         let east_asia_font = if font_family == "Courier New" {
             "ＭＳ ゴシック"
         } else {
@@ -831,8 +825,7 @@ impl<'a> ConvertContext<'a> {
             }
         };
 
-        let (width_emu, height_emu) =
-            fit_image_to_body(width_px, height_px, &self.config.page);
+        let (width_emu, height_emu) = fit_image_to_body(width_px, height_px, &self.config.page);
         let pic = Pic::new(&png_buf).size(width_emu, height_emu);
 
         let image_para = Paragraph::new()
@@ -920,15 +913,19 @@ fn apply_css_to_paragraph(mut para: Paragraph, css: &CssStyle) -> Paragraph {
             borders = borders.set(styles::css_border_to_docx(b, ParagraphBorderPosition::Top));
         }
         if let Some(ref b) = css.border_bottom {
-            borders =
-                borders.set(styles::css_border_to_docx(b, ParagraphBorderPosition::Bottom));
+            borders = borders.set(styles::css_border_to_docx(
+                b,
+                ParagraphBorderPosition::Bottom,
+            ));
         }
         if let Some(ref b) = css.border_left {
             borders = borders.set(styles::css_border_to_docx(b, ParagraphBorderPosition::Left));
         }
         if let Some(ref b) = css.border_right {
-            borders =
-                borders.set(styles::css_border_to_docx(b, ParagraphBorderPosition::Right));
+            borders = borders.set(styles::css_border_to_docx(
+                b,
+                ParagraphBorderPosition::Right,
+            ));
         }
         para.property = para.property.set_borders(borders);
     }
@@ -1241,6 +1238,19 @@ mod tests {
     }
 
     #[test]
+    fn converts_page_break_block_to_word_page_break() {
+        let docx = convert_to_docx(
+            &[Block::PageBreak],
+            &Config::default(),
+            None,
+            Path::new("."),
+        )
+        .unwrap();
+        let xml = String::from_utf8(docx.document.build()).unwrap();
+        assert!(xml.contains(r#"<w:br w:type="page" />"#));
+    }
+
+    #[test]
     fn indents_nested_ordered_lists_by_depth() {
         let nested = Block::OrderedList {
             start: 1,
@@ -1422,9 +1432,8 @@ mod tests {
 
     #[test]
     fn blockquote_css_overrides_default() {
-        let css = crate::css::parse_css(
-            "blockquote { color: #333333; border-left: 5px solid #ff0000; }",
-        );
+        let css =
+            crate::css::parse_css("blockquote { color: #333333; border-left: 5px solid #ff0000; }");
         let blocks = vec![Block::BlockQuote {
             children: vec![Block::Paragraph {
                 content: vec![Inline::Text("quoted".to_string())],
@@ -1650,9 +1659,6 @@ mod tests {
         let xml = String::from_utf8(docx.document.build()).unwrap();
 
         // デフォルトではTOCが出力されないことを確認
-        assert!(
-            !xml.contains("TOC "),
-            "TOC should not appear by default"
-        );
+        assert!(!xml.contains("TOC "), "TOC should not appear by default");
     }
 }
