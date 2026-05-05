@@ -208,8 +208,11 @@ impl<'a> ConvertContext<'a> {
             .heading_mgr
             .strip_number(effective_level, plain_text.trim());
 
+        // Run はテキストのみ（フォント・サイズ・boldはスタイルが担当）
+        let run = Run::new().add_text(&display_text);
+
         // スタイル ID: 見出し1="1", 見出し2="2", ...
-        let style_id = level.to_string();
+        let style_id = effective_level.to_string();
 
         // inline 構造から番号プレフィックスを除去
         let prefix_chars = plain_text
@@ -218,6 +221,15 @@ impl<'a> ConvertContext<'a> {
             .count()
             .saturating_sub(display_text.chars().count());
         let render_content = strip_prefix_from_inlines(content, prefix_chars);
+        // 段落にスタイルと numbering を適用
+        let para = Paragraph::new()
+            .add_run(run)
+            .style(&style_id)
+            .numbering(
+                NumberingId::new(styles::HEADING_NUM_ID),
+                IndentLevel::new((effective_level as usize).saturating_sub(1)),
+            )
+            .keep_next(true);
 
         let depth = self.config.numbering.heading_numbering_depth;
 
@@ -373,6 +385,13 @@ impl<'a> ConvertContext<'a> {
             Inline::SoftBreak => para.add_run(Run::new().add_text(" ")),
             Inline::HardBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
         }
+    }
+
+    fn convert_title(&self, docx: Docx, content: &[Inline]) -> Docx {
+        let plain_text: String = content.iter().map(|i| i.to_plain_text()).collect();
+        let run = Run::new().add_text(plain_text.trim());
+        let para = Paragraph::new().add_run(run).style(styles::TITLE_STYLE_ID);
+        docx.add_paragraph(para)
     }
 
     fn convert_page_break(&self, docx: Docx) -> Docx {
