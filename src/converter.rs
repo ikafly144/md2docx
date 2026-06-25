@@ -57,8 +57,22 @@ pub fn convert_to_docx(
         docx = docx.add_paragraph(Paragraph::new().page_break_before(true));
     }
 
-    for block in blocks {
+    let mut i = 0;
+    while i < blocks.len() {
+        let block = &blocks[i];
+        if let Block::Paragraph { content } = block {
+            if let Some(caption) = is_table_caption(content) {
+                if i + 1 < blocks.len() {
+                    if let Block::Table { .. } = &blocks[i + 1] {
+                        ctx.pending_table_caption = Some(caption);
+                        i += 1;
+                        continue;
+                    }
+                }
+            }
+        }
         docx = ctx.convert_block(docx, block)?;
+        i += 1;
     }
 
     docx.collect_footnotes();
@@ -81,6 +95,7 @@ struct ConvertContext<'a> {
     figure_seq: u32,
     table_seq: u32,
     footnote_defs: std::collections::HashMap<String, &'a Vec<Block>>,
+    pending_table_caption: Option<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -108,6 +123,7 @@ impl<'a> ConvertContext<'a> {
             figure_seq: 0,
             table_seq: 0,
             footnote_defs,
+            pending_table_caption: None,
         }
     }
 
@@ -124,7 +140,10 @@ impl<'a> ConvertContext<'a> {
                 headers,
                 rows,
                 alignments,
-            } => Ok(self.convert_table(docx, headers, rows, alignments)),
+            } => {
+                let caption = self.pending_table_caption.take();
+                Ok(self.convert_table(docx, headers, rows, alignments, caption))
+            }
             Block::CodeBlock { lang, code } => {
                 Ok(self.convert_code_block(docx, lang.as_deref(), code))
             }
@@ -756,6 +775,7 @@ impl<'a> ConvertContext<'a> {
         headers: &[Vec<Inline>],
         rows: &[Vec<Vec<Inline>>],
         alignments: &[crate::ir::Alignment],
+        caption_text: Option<String>,
     ) -> Docx {
         // 表番号キャプション
         let caption_fonts = RunFonts::new()
@@ -774,10 +794,16 @@ impl<'a> ConvertContext<'a> {
                     .add_text(format!("表{}", table_number))
                     .size(body_size)
                     .bold()
-                    .fonts(caption_fonts);
-                Paragraph::new()
-                    .add_run(label_run)
-                    .align(AlignmentType::Center)
+                    .fonts(caption_fonts.clone());
+                let mut para = Paragraph::new().add_run(label_run);
+                if let Some(caption) = &caption_text {
+                    let text_run = Run::new()
+                        .add_text(format!(" {}", caption))
+                        .size(body_size)
+                        .fonts(caption_fonts);
+                    para = para.add_run(text_run);
+                }
+                para.align(AlignmentType::Center)
             }
             _ => {
                 // 連番モード: Word SEQ フィールドを使用
@@ -794,11 +820,18 @@ impl<'a> ConvertContext<'a> {
                     .add_field_char(FieldCharType::End, false)
                     .size(body_size)
                     .bold()
-                    .fonts(caption_fonts);
-                Paragraph::new()
+                    .fonts(caption_fonts.clone());
+                let mut para = Paragraph::new()
                     .add_run(label_run)
-                    .add_run(seq_run)
-                    .align(AlignmentType::Center)
+                    .add_run(seq_run);
+                if let Some(caption) = &caption_text {
+                    let text_run = Run::new()
+                        .add_text(format!(" {}", caption))
+                        .size(body_size)
+                        .fonts(caption_fonts);
+                    para = para.add_run(text_run);
+                }
+                para.align(AlignmentType::Center)
             }
         };
 
@@ -1884,4 +1917,42 @@ mod tests {
             footnotes_xml
         );
     }
+
+    #[test]
+    fn converts_table_with_caption_in_brackets() {
+        let blocks = vec![
+            Block::Paragraph {
+                content: vec![Inline::Text("[売上表]".to_string())],
+            },
+            Block::Table {
+                headers: vec![vec![Inline::Text("Header".to_string())]],
+                rows: vec![vec![vec![Inline::Text("Cell".to_string())]]],
+                alignments: vec![crate::ir::Alignment::None],
+            },
+        ];
+
+        let docx = convert_to_docx(&blocks, &Config::default(), None, Path::new(".")).unwrap();
+        let xml = String::from_utf8(docx.document.build()).unwrap();
+
+        // The document should contain "表1" and "売上表" as a caption, and the paragraph "[売上表]" should not be rendered separately.
+        assert!(xml.contains("売上表"), "Table caption text '売上表' should be in the document");
+        assert!(xml.contains("表"), "Table caption prefix should be in the document");
+        // Verify that the original "[売上表]" paragraph is not rendered separately
+        assert!(!xml.contains("[売上表]"), "Original bracketed paragraph should be skipped and not rendered");
+    }
+}
+
+fn is_table_caption(content: &[Inline]) -> Option<String> {
+    let plain_text = content
+        .iter()
+        .map(|inline| inline.to_plain_text())
+        .collect::<String>();
+    let trimmed = plain_text.trim();
+    if trimmed.starts_with('[') && trimmed.ends_with(']') {
+        let inside = trimmed[1..trimmed.len() - 1].trim().to_string();
+        if !inside.is_empty() {
+            return Some(inside);
+        }
+    }
+    None
 }
