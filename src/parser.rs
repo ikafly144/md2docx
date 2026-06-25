@@ -6,12 +6,14 @@ use crate::ir::{Alignment, Block, Inline, ListItem};
 const PAGE_BREAK_DIRECTIVE: &str = r"\pagebreak";
 
 pub fn parse_markdown(input: &str) -> Result<Vec<Block>> {
-    let preprocessed = preprocess_div_tags(input);
+    let with_divs = preprocess_div_tags(input);
+    let preprocessed = preprocess_inline_footnotes(&with_divs);
     let mut options = Options::empty();
     options.insert(Options::ENABLE_TABLES);
     options.insert(Options::ENABLE_STRIKETHROUGH);
     options.insert(Options::ENABLE_TASKLISTS);
     options.insert(Options::ENABLE_MATH);
+    options.insert(Options::ENABLE_FOOTNOTES);
 
     let parser = Parser::new_ext(&preprocessed, options);
     let events: Vec<Event> = parser.collect();
@@ -20,6 +22,129 @@ pub fn parse_markdown(input: &str) -> Result<Vec<Block>> {
     let blocks = converter.convert(&events);
     validate_page_break_usage(&blocks)?;
     Ok(blocks)
+}
+
+/// インライン注釈 `^[注釈内容]` を通常の脚注記法 `[^__inline_fn_1]` および `[^__inline_fn_1]: 注釈内容` に変換する。
+/// コードブロックやインラインコードの中身は変換対象外とする。
+fn preprocess_inline_footnotes(input: &str) -> String {
+    let mut result = String::with_capacity(input.len() + 256);
+    let mut inline_footnotes = Vec::new();
+
+    let mut in_code_block = false;
+    let mut code_block_fence = "";
+    let mut in_code_span = false;
+    let mut code_span_ticks = 0;
+
+    let chars = input.chars().collect::<Vec<char>>();
+    let mut i = 0;
+
+    while i < chars.len() {
+        // 1. 行頭でのコードブロックフェンスの検出とトグル
+        let is_line_start = i == 0 || chars[i - 1] == '\n';
+        if is_line_start {
+            let remaining = &chars[i..];
+            let mut fence_len = 0;
+            let mut fence_char = ' ';
+            if remaining.starts_with(&['`', '`', '`']) {
+                fence_char = '`';
+                fence_len = 3;
+            } else if remaining.starts_with(&['~', '~', '~']) {
+                fence_char = '~';
+                fence_len = 3;
+            }
+            if fence_len == 3 {
+                let mut idx = i + 3;
+                while idx < chars.len() && chars[idx] == fence_char {
+                    idx += 1;
+                }
+                let count = idx - i;
+                if in_code_block {
+                    if fence_char == code_block_fence.chars().next().unwrap() && count >= code_block_fence.len() {
+                        in_code_block = false;
+                    }
+                } else {
+                    in_code_block = true;
+                    code_block_fence = if fence_char == '`' { "```" } else { "~~~" };
+                }
+            }
+        }
+
+        if in_code_block {
+            result.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        // 2. インラインコードスパンの検出とトグル
+        if chars[i] == '`' {
+            let mut count = 0;
+            while i + count < chars.len() && chars[i + count] == '`' {
+                count += 1;
+            }
+            if in_code_span {
+                if count == code_span_ticks {
+                    in_code_span = false;
+                }
+            } else {
+                in_code_span = true;
+                code_span_ticks = count;
+            }
+            for _ in 0..count {
+                result.push('`');
+            }
+            i += count;
+            continue;
+        }
+
+        if in_code_span {
+            result.push(chars[i]);
+            i += 1;
+            continue;
+        }
+
+        // 3. インライン注釈の開始 `^[` の検出とパース
+        if chars[i] == '^' && i + 1 < chars.len() && chars[i + 1] == '[' {
+            i += 2; // `^[` をスキップ
+            let mut content = String::new();
+            let mut depth = 1;
+            while i < chars.len() {
+                let c = chars[i];
+                if c == '[' {
+                    depth += 1;
+                    content.push(c);
+                    i += 1;
+                } else if c == ']' {
+                    depth -= 1;
+                    if depth == 0 {
+                        i += 1; // 閉じ括弧 `]` をスキップ
+                        break;
+                    }
+                    content.push(c);
+                    i += 1;
+                } else {
+                    content.push(c);
+                    i += 1;
+                }
+            }
+            let label = format!("__inline_fn_{}", inline_footnotes.len() + 1);
+            result.push_str(&format!("[^{}]", label));
+            inline_footnotes.push((label, content));
+            continue;
+        }
+
+        // 4. 通常文字
+        result.push(chars[i]);
+        i += 1;
+    }
+
+    // 末尾に脚注定義を追加
+    if !inline_footnotes.is_empty() {
+        for (label, content) in inline_footnotes {
+            result.push_str(&format!("\n\n[^{}]: {}", label, content));
+        }
+    }
+
+    result
 }
 
 /// <div class="..."> と </div> の後に空行がない場合、空行を挿入する。
@@ -78,6 +203,7 @@ struct EventConverter {
     span_class_stack: Vec<String>,
     div_class_stack: Vec<String>,
     div_blocks_stack: Vec<Vec<Block>>,
+    footnote_stack: Vec<(String, Vec<Block>)>,
 }
 
 struct ListContext {
@@ -111,6 +237,7 @@ impl EventConverter {
             span_class_stack: Vec::new(),
             div_class_stack: Vec::new(),
             div_blocks_stack: Vec::new(),
+            footnote_stack: Vec::new(),
         }
     }
 
@@ -158,6 +285,9 @@ impl EventConverter {
             }
             Event::DisplayMath(math) => {
                 self.add_block(Block::DisplayMath(math.to_string()));
+            }
+            Event::FootnoteReference(label) => {
+                self.push_inline(Inline::FootnoteReference(label.to_string()));
             }
             Event::Rule => {
                 self.add_block(Block::ThematicBreak);
@@ -253,6 +383,9 @@ impl EventConverter {
             Tag::Image { dest_url, .. } => {
                 self.inline_stack.push(Vec::new());
                 self.current_image_path = Some(dest_url.to_string());
+            }
+            Tag::FootnoteDefinition(label) => {
+                self.footnote_stack.push((label.to_string(), Vec::new()));
             }
             _ => {}
         }
@@ -370,6 +503,11 @@ impl EventConverter {
                 let path = self.current_image_path.take().unwrap_or_default();
                 self.add_block(Block::Image { alt, path });
             }
+            TagEnd::FootnoteDefinition => {
+                if let Some((label, children)) = self.footnote_stack.pop() {
+                    self.add_block(Block::FootnoteDefinition { label, children });
+                }
+            }
             _ => {}
         }
     }
@@ -405,6 +543,8 @@ impl EventConverter {
             self.div_blocks_stack.last_mut().unwrap().push(block);
         } else if !self.block_quote_stack.is_empty() {
             self.block_quote_stack.last_mut().unwrap().push(block);
+        } else if !self.footnote_stack.is_empty() {
+            self.footnote_stack.last_mut().unwrap().1.push(block);
         } else if !self.list_stack.is_empty() {
             // リスト内のネストされたブロック
             if let Some(list_ctx) = self.list_stack.last_mut() {
@@ -525,6 +665,11 @@ fn validate_block(block: &Block) -> Result<()> {
                 validate_block(child)?;
             }
         }
+        Block::FootnoteDefinition { children, .. } => {
+            for child in children {
+                validate_block(child)?;
+            }
+        }
         Block::DisplayMath(text) => ensure_no_page_break_directive(text)?,
     }
     Ok(())
@@ -550,6 +695,7 @@ fn validate_inline(inline: &Inline) -> Result<()> {
             ensure_no_page_break_directive(class)?;
             validate_inlines(children)?;
         }
+        Inline::FootnoteReference(label) => ensure_no_page_break_directive(label)?,
         Inline::InlineMath(text) => ensure_no_page_break_directive(text)?,
     }
     Ok(())
@@ -818,5 +964,69 @@ mod tests {
                 .to_string()
                 .contains(r"`\pagebreak`は段落単位で単独指定した場合のみ利用できます")
         );
+    }
+
+    #[test]
+    fn parses_footnotes() {
+        let md = "Here is a reference[^1].\n\n[^1]: This is the footnote content.\n";
+        let blocks = parse_markdown(md).unwrap();
+        assert_eq!(blocks.len(), 2);
+
+        match &blocks[0] {
+            Block::Paragraph { content } => {
+                assert_eq!(content.len(), 3);
+                assert!(matches!(&content[0], Inline::Text(t) if t == "Here is a reference"));
+                assert!(matches!(&content[1], Inline::FootnoteReference(label) if label == "1"));
+                assert!(matches!(&content[2], Inline::Text(t) if t == "."));
+            }
+            other => panic!("expected paragraph, got {:?}", other),
+        }
+
+        match &blocks[1] {
+            Block::FootnoteDefinition { label, children } => {
+                assert_eq!(label, "1");
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    Block::Paragraph { content } => {
+                        assert_eq!(content.len(), 1);
+                        assert!(matches!(&content[0], Inline::Text(t) if t == "This is the footnote content."));
+                    }
+                    other => panic!("expected paragraph inside footnote, got {:?}", other),
+                }
+            }
+            other => panic!("expected FootnoteDefinition, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn parses_inline_footnotes() {
+        let md = "Here is an inline footnote^[This is the inline footnote content.].";
+        let blocks = parse_markdown(md).unwrap();
+        assert_eq!(blocks.len(), 2);
+
+        match &blocks[0] {
+            Block::Paragraph { content } => {
+                assert_eq!(content.len(), 3);
+                assert!(matches!(&content[0], Inline::Text(t) if t == "Here is an inline footnote"));
+                assert!(matches!(&content[1], Inline::FootnoteReference(label) if label == "__inline_fn_1"));
+                assert!(matches!(&content[2], Inline::Text(t) if t == "."));
+            }
+            other => panic!("expected paragraph, got {:?}", other),
+        }
+
+        match &blocks[1] {
+            Block::FootnoteDefinition { label, children } => {
+                assert_eq!(label, "__inline_fn_1");
+                assert_eq!(children.len(), 1);
+                match &children[0] {
+                    Block::Paragraph { content } => {
+                        assert_eq!(content.len(), 1);
+                        assert!(matches!(&content[0], Inline::Text(t) if t == "This is the inline footnote content."));
+                    }
+                    other => panic!("expected paragraph inside footnote, got {:?}", other),
+                }
+            }
+            other => panic!("expected FootnoteDefinition, got {:?}", other),
+        }
     }
 }

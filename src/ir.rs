@@ -52,6 +52,10 @@ pub enum Block {
         class: String,
         children: Vec<Block>,
     },
+    FootnoteDefinition {
+        label: String,
+        children: Vec<Block>,
+    },
     DisplayMath(String),
     ThematicBreak,
 }
@@ -65,6 +69,7 @@ pub enum Inline {
     Link { text: Vec<Inline>, url: String },
     StyledSpan { class: String, children: Vec<Inline> },
     InlineMath(String),
+    FootnoteReference(String),
     SoftBreak,
     HardBreak,
 }
@@ -82,6 +87,7 @@ impl Inline {
                 text.iter().map(|c| c.to_plain_text()).collect()
             }
             Inline::InlineMath(s) => format!("${s}$"),
+            Inline::FootnoteReference(label) => format!("[^{label}]"),
             Inline::SoftBreak | Inline::HardBreak => String::new(),
         }
     }

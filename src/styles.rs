@@ -29,6 +29,11 @@ const BULLET_ABSTRACT_NUM_ID: usize = 9;
 /// 箇条書きスタイルの styleId
 pub const BULLET_STYLE_ID: &str = "BulletList";
 
+/// 脚注の numId (numbering.xml の num 要素 ID)
+pub const FOOTNOTE_NUM_ID: usize = 4;
+/// 脚注の abstractNumId
+const FOOTNOTE_ABSTRACT_NUM_ID: usize = 10;
+
 /// 表題スタイルの styleId（Word 標準「表題」= "Title"）
 pub const TITLE_STYLE_ID: &str = "Title";
 
@@ -450,6 +455,26 @@ pub fn setup_document_styles(docx: Docx, config: &Config, css_rules: Option<&Css
         .name("Bullet List")
         .based_on("Normal");
 
+    // --- 脚注の番号付きリスト定義 (abstractNumId=10, numId=4) ---
+    let footnote_abstract = AbstractNumbering::new(FOOTNOTE_ABSTRACT_NUM_ID)
+        .add_level(
+            Level::new(
+                0,
+                Start::new(1),
+                NumberFormat::new("decimal"),
+                LevelText::new("%1."),
+                LevelJc::new("left"),
+            )
+            .indent(
+                Some(360),
+                Some(SpecialIndentType::Hanging(360)),
+                None,
+                None,
+            ),
+        );
+
+    let footnote_numbering = Numbering::new(FOOTNOTE_NUM_ID, FOOTNOTE_ABSTRACT_NUM_ID);
+
     // --- CSS による見出しスタイル上書き ---
     if let Some(css) = css_rules {
         apply_css_to_heading(&mut heading1_style, css.h1.as_ref(), "h1");
@@ -471,8 +496,10 @@ pub fn setup_document_styles(docx: Docx, config: &Config, css_rules: Option<&Css
         .add_style(bullet_style)
         .add_abstract_numbering(abstract_numbering)
         .add_abstract_numbering(bullet_abstract)
+        .add_abstract_numbering(footnote_abstract)
         .add_numbering(numbering)
-        .add_numbering(bullet_numbering);
+        .add_numbering(bullet_numbering)
+        .add_numbering(footnote_numbering);
 
     // --- CSS classes → Character スタイル登録 ---
     if let Some(css) = css_rules {

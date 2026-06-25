@@ -21,7 +21,14 @@ pub fn convert_to_docx(
     css_rules: Option<&CssRules>,
     base_path: &Path,
 ) -> Result<Docx> {
-    let mut ctx = ConvertContext::new(config, css_rules, base_path);
+    let mut footnote_defs = std::collections::HashMap::new();
+    for block in blocks {
+        if let Block::FootnoteDefinition { label, children } = block {
+            footnote_defs.insert(label.clone(), children);
+        }
+    }
+
+    let mut ctx = ConvertContext::new(config, css_rules, base_path, footnote_defs);
     let mut docx = Docx::new();
 
     // sample.docx 準拠のスタイル・番号定義を適用
@@ -54,6 +61,8 @@ pub fn convert_to_docx(
         docx = ctx.convert_block(docx, block)?;
     }
 
+    docx.collect_footnotes();
+
     Ok(docx)
 }
 
@@ -71,6 +80,7 @@ struct ConvertContext<'a> {
     /// グローバル連番（sequential モード用）
     figure_seq: u32,
     table_seq: u32,
+    footnote_defs: std::collections::HashMap<String, &'a Vec<Block>>,
 }
 
 #[derive(Clone, Copy)]
@@ -81,7 +91,12 @@ enum InlineStyle {
 }
 
 impl<'a> ConvertContext<'a> {
-    fn new(config: &'a Config, css_rules: Option<&'a CssRules>, base_path: &'a Path) -> Self {
+    fn new(
+        config: &'a Config,
+        css_rules: Option<&'a CssRules>,
+        base_path: &'a Path,
+        footnote_defs: std::collections::HashMap<String, &'a Vec<Block>>,
+    ) -> Self {
         Self {
             config,
             css_rules,
@@ -92,6 +107,7 @@ impl<'a> ConvertContext<'a> {
             table_in_chapter: 0,
             figure_seq: 0,
             table_seq: 0,
+            footnote_defs,
         }
     }
 
@@ -164,6 +180,10 @@ impl<'a> ConvertContext<'a> {
             Block::ThematicBreak => {
                 // 水平線 → 空段落で代替
                 Ok(docx.add_paragraph(Paragraph::new()))
+            }
+            Block::FootnoteDefinition { .. } => {
+                // 脚注定義は参照された際にその場で処理されるため、メインフローでは無視する
+                Ok(docx)
             }
         }
     }
@@ -301,7 +321,7 @@ impl<'a> ConvertContext<'a> {
 
     /// 見出し内の Inline 要素をパラグラフに追加する。
     /// body テキストのフォント/サイズは適用せず、見出しの段落スタイルに委ねる。
-    fn add_inline_to_heading(&self, para: Paragraph, inline: &Inline, bold: bool) -> Paragraph {
+    fn add_inline_to_heading(&mut self, para: Paragraph, inline: &Inline, bold: bool) -> Paragraph {
         match inline {
             Inline::Text(text) => {
                 let processed = process_text(text);
@@ -384,6 +404,23 @@ impl<'a> ConvertContext<'a> {
             },
             Inline::SoftBreak => para.add_run(Run::new().add_text(" ")),
             Inline::HardBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
+            Inline::FootnoteReference(label) => {
+                if let Some(children) = self.footnote_defs.get(label).cloned() {
+                    match self.convert_footnote_blocks(children) {
+                        Ok(footnote) => {
+                            let run = Run::new().add_footnote_reference(footnote);
+                            para.add_run(run)
+                        }
+                        Err(e) => {
+                            eprintln!("Error converting footnote: {}", e);
+                            para
+                        }
+                    }
+                } else {
+                    eprintln!("warning: Undefined footnote reference `{}`", label);
+                    para
+                }
+            }
         }
     }
 
@@ -433,14 +470,14 @@ impl<'a> ConvertContext<'a> {
         }
     }
 
-    fn convert_paragraph(&self, docx: Docx, content: &[Inline]) -> Docx {
+    fn convert_paragraph(&mut self, docx: Docx, content: &[Inline]) -> Docx {
         let para = self
             .build_paragraph(content, false, InlineStyle::Body)
             .style(styles::BODY_TEXT_STYLE_ID);
         docx.add_paragraph(para)
     }
 
-    fn build_paragraph(&self, content: &[Inline], bold: bool, style: InlineStyle) -> Paragraph {
+    fn build_paragraph(&mut self, content: &[Inline], bold: bool, style: InlineStyle) -> Paragraph {
         let mut para = Paragraph::new();
         for inline in content {
             para = self.add_inline_to_paragraph(para, inline, bold, style);
@@ -449,7 +486,7 @@ impl<'a> ConvertContext<'a> {
     }
 
     fn add_inline_to_paragraph(
-        &self,
+        &mut self,
         para: Paragraph,
         inline: &Inline,
         bold: bool,
@@ -541,7 +578,54 @@ impl<'a> ConvertContext<'a> {
             },
             Inline::SoftBreak => para.add_run(self.make_run(" ", style)),
             Inline::HardBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
+            Inline::FootnoteReference(label) => {
+                if let Some(children) = self.footnote_defs.get(label).cloned() {
+                    match self.convert_footnote_blocks(children) {
+                        Ok(footnote) => {
+                            let run = Run::new().add_footnote_reference(footnote);
+                            para.add_run(run)
+                        }
+                        Err(e) => {
+                            eprintln!("Error converting footnote: {}", e);
+                            para
+                        }
+                    }
+                } else {
+                    eprintln!("warning: Undefined footnote reference `{}`", label);
+                    para
+                }
+            }
         }
+    }
+
+    fn convert_footnote_blocks(&mut self, children: &[Block]) -> Result<Footnote> {
+        let mut temp_docx = Docx::new();
+        for child in children {
+            temp_docx = self.convert_block(temp_docx, child)?;
+        }
+
+        let mut footnote = Footnote::new();
+        let mut is_first = true;
+
+        for child in temp_docx.document.children {
+            match child {
+                DocumentChild::Paragraph(para) => {
+                    let mut p = *para;
+                    if is_first {
+                        p = p.numbering(
+                            NumberingId::new(styles::FOOTNOTE_NUM_ID),
+                            IndentLevel::new(0),
+                        );
+                        is_first = false;
+                    } else {
+                        p = p.indent(Some(360), None, None, None);
+                    }
+                    footnote.content.push(p);
+                }
+                _ => {}
+            }
+        }
+        Ok(footnote)
     }
 
     fn make_run(&self, text: &str, style: InlineStyle) -> Run {
@@ -1771,5 +1855,33 @@ mod tests {
 
         // デフォルトではTOCが出力されないことを確認
         assert!(!xml.contains("TOC "), "TOC should not appear by default");
+    }
+
+    #[test]
+    fn converts_footnotes_to_docx() {
+        let blocks = vec![
+            Block::Paragraph {
+                content: vec![
+                    Inline::Text("Referenced text".to_string()),
+                    Inline::FootnoteReference("1".to_string()),
+                ],
+            },
+            Block::FootnoteDefinition {
+                label: "1".to_string(),
+                children: vec![Block::Paragraph {
+                    content: vec![Inline::Text("Footnote text".to_string())],
+                }],
+            },
+        ];
+
+        let docx = convert_to_docx(&blocks, &Config::default(), None, Path::new(".")).unwrap();
+        let footnotes_xml = String::from_utf8(docx.footnotes.build()).unwrap();
+
+        // Native paragraph numbering has w:numId val="4" (styles::FOOTNOTE_NUM_ID)
+        assert!(
+            footnotes_xml.contains(r#"w:numId w:val="4""#) && footnotes_xml.contains("Footnote text"),
+            "Footnotes XML should contain native numbering and text, got: {}",
+            footnotes_xml
+        );
     }
 }

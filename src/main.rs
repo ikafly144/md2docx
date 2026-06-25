@@ -113,10 +113,10 @@ use crate::config::Config;
   インライン: テキスト / コード / 太字 / 斜体 / リンク / span装飾"
 )]
 struct Cli {
-    /// 変換する Markdown ファイルのパス
-    input: PathBuf,
+    /// 変換する Markdown ファイルのパス [省略時、または "-" の場合は標準入力]
+    input: Option<PathBuf>,
 
-    /// 出力ファイルパス [省略時: <入力ファイル名>.docx]
+    /// 出力ファイルパス [省略時: <入力ファイル名>.docx、標準入力時は output.docx]
     #[arg(short, long, value_name = "FILE")]
     output: Option<PathBuf>,
 
@@ -130,6 +130,7 @@ struct Cli {
 }
 
 fn main() -> Result<()> {
+    use std::io::Read;
     let cli = Cli::parse();
 
     // 設定ファイルの読み込み
@@ -139,16 +140,34 @@ fn main() -> Result<()> {
         None => Config::default(),
     };
 
-    // 入力ファイルの読み込み
-    let input_path = &cli.input;
-    let markdown = std::fs::read_to_string(input_path)
-        .with_context(|| format!("入力ファイルの読み込みに失敗: {}", input_path.display()))?;
+    // 入力が標準入力かどうかを判定
+    let is_stdin = match &cli.input {
+        None => true,
+        Some(path) => path.to_str() == Some("-"),
+    };
+
+    // Markdown テキストの読み込み
+    let markdown = if is_stdin {
+        let mut buffer = String::new();
+        std::io::stdin()
+            .read_to_string(&mut buffer)
+            .context("標準入力からの読み込みに失敗しました")?;
+        buffer
+    } else {
+        let input_path = cli.input.as_ref().unwrap();
+        std::fs::read_to_string(input_path)
+            .with_context(|| format!("入力ファイルの読み込みに失敗: {}", input_path.display()))?
+    };
 
     // 出力パスの決定
-    let output_path = cli.output.unwrap_or_else(|| {
-        let mut p = input_path.clone();
-        p.set_extension("docx");
-        p
+    let output_path = cli.output.clone().unwrap_or_else(|| {
+        if is_stdin {
+            PathBuf::from("output.docx")
+        } else {
+            let mut p = cli.input.as_ref().unwrap().clone();
+            p.set_extension("docx");
+            p
+        }
     });
 
     // CSS ファイルの読み込み
@@ -161,11 +180,21 @@ fn main() -> Result<()> {
     };
 
     // ベースパス（画像の相対パス解決用）
-    let base_path = input_path.parent().unwrap_or_else(|| Path::new("."));
+    let base_path = if is_stdin {
+        Path::new(".")
+    } else {
+        cli.input.as_ref().unwrap().parent().unwrap_or_else(|| Path::new("."))
+    };
 
     // Markdown → IR
-    let blocks = parser::parse_markdown(&markdown)
-        .with_context(|| format!("Markdownの解釈に失敗: {}", input_path.display()))?;
+    let blocks = if is_stdin {
+        parser::parse_markdown(&markdown)
+            .context("標準入力のMarkdownの解釈に失敗しました")?
+    } else {
+        let input_path = cli.input.as_ref().unwrap();
+        parser::parse_markdown(&markdown)
+            .with_context(|| format!("Markdownの解釈に失敗: {}", input_path.display()))?
+    };
 
     // IR → docx
     let docx = converter::convert_to_docx(&blocks, &config, css_rules.as_ref(), base_path)?;
