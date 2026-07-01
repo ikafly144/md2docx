@@ -75,8 +75,6 @@ pub fn convert_to_docx(
         i += 1;
     }
 
-    docx.collect_footnotes();
-
     Ok(docx)
 }
 
@@ -96,6 +94,7 @@ struct ConvertContext<'a> {
     table_seq: u32,
     footnote_defs: std::collections::HashMap<String, &'a Vec<Block>>,
     pending_table_caption: Option<String>,
+    footnote_indices: std::collections::HashMap<String, usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +123,7 @@ impl<'a> ConvertContext<'a> {
             table_seq: 0,
             footnote_defs,
             pending_table_caption: None,
+            footnote_indices: std::collections::HashMap::new(),
         }
     }
 
@@ -425,15 +425,31 @@ impl<'a> ConvertContext<'a> {
             Inline::HardBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
             Inline::FootnoteReference(label) => {
                 if let Some(children) = self.footnote_defs.get(label).cloned() {
-                    match self.convert_footnote_blocks(children) {
-                        Ok(footnote) => {
-                            let run = Run::new().add_footnote_reference(footnote);
-                            para.add_run(run)
+                    let mut is_new = false;
+                    let num = if let Some(&idx) = self.footnote_indices.get(label) {
+                        idx
+                    } else {
+                        is_new = true;
+                        let idx = self.footnote_indices.len() + 1;
+                        self.footnote_indices.insert(label.clone(), idx);
+                        idx
+                    };
+
+                    if is_new {
+                        match self.convert_footnote_blocks(&children, num) {
+                            Ok(footnote) => {
+                                let run = Run::new().add_footnote_reference(footnote);
+                                para.add_run(run)
+                            }
+                            Err(e) => {
+                                eprintln!("Error converting footnote: {}", e);
+                                para
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("Error converting footnote: {}", e);
-                            para
-                        }
+                    } else {
+                        let mut run = Run::new().add_text(format!("{}", num));
+                        run.run_property = run.run_property.vert_align(VertAlignType::SuperScript);
+                        para.add_run(run)
                     }
                 } else {
                     eprintln!("warning: Undefined footnote reference `{}`", label);
@@ -599,15 +615,31 @@ impl<'a> ConvertContext<'a> {
             Inline::HardBreak => para.add_run(Run::new().add_break(BreakType::TextWrapping)),
             Inline::FootnoteReference(label) => {
                 if let Some(children) = self.footnote_defs.get(label).cloned() {
-                    match self.convert_footnote_blocks(children) {
-                        Ok(footnote) => {
-                            let run = Run::new().add_footnote_reference(footnote);
-                            para.add_run(run)
+                    let mut is_new = false;
+                    let num = if let Some(&idx) = self.footnote_indices.get(label) {
+                        idx
+                    } else {
+                        is_new = true;
+                        let idx = self.footnote_indices.len() + 1;
+                        self.footnote_indices.insert(label.clone(), idx);
+                        idx
+                    };
+
+                    if is_new {
+                        match self.convert_footnote_blocks(children, num) {
+                            Ok(footnote) => {
+                                let run = Run::new().add_footnote_reference(footnote);
+                                para.add_run(run)
+                            }
+                            Err(e) => {
+                                eprintln!("Error converting footnote: {}", e);
+                                para
+                            }
                         }
-                        Err(e) => {
-                            eprintln!("Error converting footnote: {}", e);
-                            para
-                        }
+                    } else {
+                        let mut run = self.make_run(&format!("{}", num), style);
+                        run.run_property = run.run_property.vert_align(VertAlignType::SuperScript);
+                        para.add_run(run)
                     }
                 } else {
                     eprintln!("warning: Undefined footnote reference `{}`", label);
@@ -617,13 +649,14 @@ impl<'a> ConvertContext<'a> {
         }
     }
 
-    fn convert_footnote_blocks(&mut self, children: &[Block]) -> Result<Footnote> {
+    fn convert_footnote_blocks(&mut self, children: &[Block], id: usize) -> Result<Footnote> {
         let mut temp_docx = Docx::new();
         for child in children {
             temp_docx = self.convert_block(temp_docx, child)?;
         }
 
         let mut footnote = Footnote::new();
+        footnote.id = id;
         let mut is_first = true;
 
         for child in temp_docx.document.children {
@@ -1907,7 +1940,8 @@ mod tests {
             },
         ];
 
-        let docx = convert_to_docx(&blocks, &Config::default(), None, Path::new(".")).unwrap();
+        let mut docx = convert_to_docx(&blocks, &Config::default(), None, Path::new(".")).unwrap();
+        docx.collect_footnotes();
         let footnotes_xml = String::from_utf8(docx.footnotes.build()).unwrap();
 
         // Native paragraph numbering has w:numId val="4" (styles::FOOTNOTE_NUM_ID)
@@ -1916,6 +1950,42 @@ mod tests {
             "Footnotes XML should contain native numbering and text, got: {}",
             footnotes_xml
         );
+    }
+
+    #[test]
+    fn converts_duplicate_footnote_references_correctly() {
+        let blocks = vec![
+            Block::Paragraph {
+                content: vec![
+                    Inline::Text("First reference".to_string()),
+                    Inline::FootnoteReference("1".to_string()),
+                    Inline::Text(" and second reference".to_string()),
+                    Inline::FootnoteReference("1".to_string()),
+                ],
+            },
+            Block::FootnoteDefinition {
+                label: "1".to_string(),
+                children: vec![Block::Paragraph {
+                    content: vec![Inline::Text("Footnote text".to_string())],
+                }],
+            },
+        ];
+
+        let mut docx = convert_to_docx(&blocks, &Config::default(), None, Path::new(".")).unwrap();
+        docx.collect_footnotes();
+        let footnotes_xml = String::from_utf8(docx.footnotes.build()).unwrap();
+        let doc_xml = String::from_utf8(docx.document.build()).unwrap();
+
+        // 1. Footnotes XML should contain exactly one definition of "Footnote text"
+        let count = footnotes_xml.matches("Footnote text").count();
+        assert_eq!(count, 1, "There should be exactly one footnote text definition in footnotes.xml");
+
+        // 2. Main document XML should contain only one w:footnoteReference
+        let ref_count = doc_xml.matches("<w:footnoteReference").count();
+        assert_eq!(ref_count, 1, "There should be exactly one footnote reference tag in the document XML");
+
+        // 3. Main document XML should contain the superscript text for the second reference
+        assert!(doc_xml.contains("superscript"), "Document XML should contain superscript alignment for the second reference");
     }
 
     #[test]
