@@ -446,7 +446,10 @@ impl<'a> ConvertContext<'a> {
                         match self.convert_footnote_blocks(&children, num) {
                             Ok(footnote) => {
                                 let run = Run::new().add_footnote_reference(footnote);
-                                para.add_run(run)
+                                let bookmark_name = format!("_footnote_ref_{}", num);
+                                para.add_bookmark_start(num, &bookmark_name)
+                                    .add_run(run)
+                                    .add_bookmark_end(num)
                             }
                             Err(e) => {
                                 eprintln!("Error converting footnote: {}", e);
@@ -454,10 +457,11 @@ impl<'a> ConvertContext<'a> {
                             }
                         }
                     } else {
-                        let mut duplicate_footnote = Footnote::new();
-                        duplicate_footnote.id = num;
-                        let run = Run::new().add_footnote_reference(duplicate_footnote);
-                        para.add_run(run)
+                        let bookmark_name = format!("_footnote_ref_{}", num);
+                        let mut run = Run::new().add_text(format!("{}", num));
+                        run.run_property = run.run_property.style("FootnoteReference");
+                        let hyperlink = Hyperlink::new(&bookmark_name, HyperlinkType::Anchor).add_run(run);
+                        para.add_hyperlink(hyperlink)
                     }
                 } else {
                     eprintln!("warning: Undefined footnote reference `{}`", label);
@@ -642,7 +646,10 @@ impl<'a> ConvertContext<'a> {
                         match self.convert_footnote_blocks(children, num) {
                             Ok(footnote) => {
                                 let run = Run::new().add_footnote_reference(footnote);
-                                para.add_run(run)
+                                let bookmark_name = format!("_footnote_ref_{}", num);
+                                para.add_bookmark_start(num, &bookmark_name)
+                                    .add_run(run)
+                                    .add_bookmark_end(num)
                             }
                             Err(e) => {
                                 eprintln!("Error converting footnote: {}", e);
@@ -650,10 +657,11 @@ impl<'a> ConvertContext<'a> {
                             }
                         }
                     } else {
-                        let mut duplicate_footnote = Footnote::new();
-                        duplicate_footnote.id = num;
-                        let run = Run::new().add_footnote_reference(duplicate_footnote);
-                        para.add_run(run)
+                        let bookmark_name = format!("_footnote_ref_{}", num);
+                        let mut run = Run::new().add_text(format!("{}", num));
+                        run.run_property = run.run_property.style("FootnoteReference");
+                        let hyperlink = Hyperlink::new(&bookmark_name, HyperlinkType::Anchor).add_run(run);
+                        para.add_hyperlink(hyperlink)
                     }
                 } else {
                     eprintln!("warning: Undefined footnote reference `{}`", label);
@@ -2002,15 +2010,18 @@ mod tests {
         let count = footnotes_xml.matches("Footnote text").count();
         assert_eq!(count, 1, "There should be exactly one footnote text definition in footnotes.xml");
 
-        // 2. Main document XML should contain exactly two footnoteReference elements
+        // 2. Main document XML should contain exactly one footnoteReference element
         let ref_count = doc_xml.matches("<w:footnoteReference").count();
-        assert_eq!(ref_count, 2, "There should be exactly two footnote reference tags in the document XML");
+        assert_eq!(ref_count, 1, "There should be exactly one footnote reference tag in the document XML");
 
         // 3. Main document XML should contain style for the footnote reference
         assert!(doc_xml.contains("FootnoteReference"), "Document XML should contain FootnoteReference style");
 
         // 4. Footnotes XML should contain exactly one footnote element for w:id="1"
         assert_eq!(footnotes_xml.matches("w:id=\"1\"").count(), 1, "There should be exactly one w:id=\"1\" in footnotes.xml");
+
+        // 5. Main document XML should contain a hyperlink pointing to the bookmark
+        assert!(doc_xml.contains(r#"w:anchor="_footnote_ref_1""#), "Document XML should contain hyperlink to the bookmark");
     }
 
     #[test]
