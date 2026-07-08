@@ -2008,6 +2008,9 @@ mod tests {
 
         // 3. Main document XML should contain style for the footnote reference
         assert!(doc_xml.contains("FootnoteReference"), "Document XML should contain FootnoteReference style");
+
+        // 4. Footnotes XML should contain exactly one footnote element for w:id="1"
+        assert_eq!(footnotes_xml.matches("w:id=\"1\"").count(), 1, "There should be exactly one w:id=\"1\" in footnotes.xml");
     }
 
     #[test]
@@ -2056,6 +2059,18 @@ pub fn deduplicate_footnotes(xml: &str) -> String {
     
     while let Some(start_idx) = xml[pos..].find("<w:footnote") {
         let absolute_start = pos + start_idx;
+        
+        // w:footnotes などの親タグとの誤一致を防ぐため、次の文字がスペースまたは '>' であるか検証する
+        if absolute_start + 11 < xml.len() {
+            let next_byte = xml.as_bytes()[absolute_start + 11];
+            if next_byte != b' ' && next_byte != b'>' {
+                // <w:footnotes などを検出した場合は、プレフィックス部分のみを追加して検索位置を進める
+                result.push_str(&xml[pos..absolute_start + 11]);
+                pos = absolute_start + 11;
+                continue;
+            }
+        }
+        
         result.push_str(&xml[pos..absolute_start]);
         
         if let Some(end_idx) = xml[absolute_start..].find("</w:footnote>") {
