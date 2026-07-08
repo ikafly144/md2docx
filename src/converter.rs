@@ -95,6 +95,7 @@ struct ConvertContext<'a> {
     footnote_defs: std::collections::HashMap<String, &'a Vec<Block>>,
     pending_table_caption: Option<String>,
     footnote_indices: std::collections::HashMap<String, usize>,
+    in_footnote: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -124,6 +125,7 @@ impl<'a> ConvertContext<'a> {
             footnote_defs,
             pending_table_caption: None,
             footnote_indices: std::collections::HashMap::new(),
+            in_footnote: false,
         }
     }
 
@@ -380,12 +382,17 @@ impl<'a> ConvertContext<'a> {
                 if bold {
                     run = run.bold();
                 }
-                let hyperlink = if let Some(anchor) = url.strip_prefix('#') {
-                    Hyperlink::new(anchor, HyperlinkType::Anchor).add_run(run)
+                if self.in_footnote {
+                    run = run.color("0563C1").underline("single");
+                    para.add_run(run)
                 } else {
-                    Hyperlink::new(url, HyperlinkType::External).add_run(run)
-                };
-                para.add_hyperlink(hyperlink)
+                    let hyperlink = if let Some(anchor) = url.strip_prefix('#') {
+                        Hyperlink::new(anchor, HyperlinkType::Anchor).add_run(run)
+                    } else {
+                        Hyperlink::new(url, HyperlinkType::External).add_run(run)
+                    };
+                    para.add_hyperlink(hyperlink)
+                }
             }
             Inline::StyledSpan { class, children } => {
                 let style_id = format!("css-{}", class);
@@ -447,8 +454,9 @@ impl<'a> ConvertContext<'a> {
                             }
                         }
                     } else {
-                        let mut run = Run::new().add_text(format!("{}", num));
-                        run.run_property = run.run_property.vert_align(VertAlignType::SuperScript);
+                        let mut duplicate_footnote = Footnote::new();
+                        duplicate_footnote.id = num;
+                        let run = Run::new().add_footnote_reference(duplicate_footnote);
                         para.add_run(run)
                     }
                 } else {
@@ -569,13 +577,18 @@ impl<'a> ConvertContext<'a> {
                     run = run.bold();
                 }
 
-                let hyperlink = if let Some(anchor) = url.strip_prefix('#') {
-                    Hyperlink::new(anchor, HyperlinkType::Anchor).add_run(run)
+                if self.in_footnote {
+                    run = run.color("0563C1").underline("single");
+                    para.add_run(run)
                 } else {
-                    Hyperlink::new(url, HyperlinkType::External).add_run(run)
-                };
+                    let hyperlink = if let Some(anchor) = url.strip_prefix('#') {
+                        Hyperlink::new(anchor, HyperlinkType::Anchor).add_run(run)
+                    } else {
+                        Hyperlink::new(url, HyperlinkType::External).add_run(run)
+                    };
 
-                para.add_hyperlink(hyperlink)
+                    para.add_hyperlink(hyperlink)
+                }
             }
             Inline::StyledSpan { class, children } => {
                 let style_id = format!("css-{}", class);
@@ -637,8 +650,9 @@ impl<'a> ConvertContext<'a> {
                             }
                         }
                     } else {
-                        let mut run = self.make_run(&format!("{}", num), style);
-                        run.run_property = run.run_property.vert_align(VertAlignType::SuperScript);
+                        let mut duplicate_footnote = Footnote::new();
+                        duplicate_footnote.id = num;
+                        let run = Run::new().add_footnote_reference(duplicate_footnote);
                         para.add_run(run)
                     }
                 } else {
@@ -650,10 +664,16 @@ impl<'a> ConvertContext<'a> {
     }
 
     fn convert_footnote_blocks(&mut self, children: &[Block], id: usize) -> Result<Footnote> {
+        self.in_footnote = true;
         let mut temp_docx = Docx::new();
-        for child in children {
-            temp_docx = self.convert_block(temp_docx, child)?;
-        }
+        let res: Result<Docx> = (|| {
+            for child in children {
+                temp_docx = self.convert_block(temp_docx, child)?;
+            }
+            Ok(temp_docx)
+        })();
+        self.in_footnote = false;
+        let temp_docx = res?;
 
         let mut footnote = Footnote::new();
         footnote.id = id;
@@ -1943,6 +1963,7 @@ mod tests {
         let mut docx = convert_to_docx(&blocks, &Config::default(), None, Path::new(".")).unwrap();
         docx.collect_footnotes();
         let footnotes_xml = String::from_utf8(docx.footnotes.build()).unwrap();
+        let footnotes_xml = deduplicate_footnotes(&footnotes_xml);
 
         // Native paragraph numbering has w:numId val="4" (styles::FOOTNOTE_NUM_ID)
         assert!(
@@ -1974,18 +1995,19 @@ mod tests {
         let mut docx = convert_to_docx(&blocks, &Config::default(), None, Path::new(".")).unwrap();
         docx.collect_footnotes();
         let footnotes_xml = String::from_utf8(docx.footnotes.build()).unwrap();
+        let footnotes_xml = deduplicate_footnotes(&footnotes_xml);
         let doc_xml = String::from_utf8(docx.document.build()).unwrap();
 
         // 1. Footnotes XML should contain exactly one definition of "Footnote text"
         let count = footnotes_xml.matches("Footnote text").count();
         assert_eq!(count, 1, "There should be exactly one footnote text definition in footnotes.xml");
 
-        // 2. Main document XML should contain only one w:footnoteReference
+        // 2. Main document XML should contain exactly two footnoteReference elements
         let ref_count = doc_xml.matches("<w:footnoteReference").count();
-        assert_eq!(ref_count, 1, "There should be exactly one footnote reference tag in the document XML");
+        assert_eq!(ref_count, 2, "There should be exactly two footnote reference tags in the document XML");
 
-        // 3. Main document XML should contain the superscript text for the second reference
-        assert!(doc_xml.contains("superscript"), "Document XML should contain superscript alignment for the second reference");
+        // 3. Main document XML should contain style for the footnote reference
+        assert!(doc_xml.contains("FootnoteReference"), "Document XML should contain FootnoteReference style");
     }
 
     #[test]
@@ -2022,6 +2044,47 @@ fn is_table_caption(content: &[Inline]) -> Option<String> {
         let inside = trimmed[1..trimmed.len() - 1].trim().to_string();
         if !inside.is_empty() {
             return Some(inside);
+        }
+    }
+    None
+}
+
+pub fn deduplicate_footnotes(xml: &str) -> String {
+    let mut result = String::new();
+    let mut pos = 0;
+    let mut seen_ids = std::collections::HashSet::new();
+    
+    while let Some(start_idx) = xml[pos..].find("<w:footnote") {
+        let absolute_start = pos + start_idx;
+        result.push_str(&xml[pos..absolute_start]);
+        
+        if let Some(end_idx) = xml[absolute_start..].find("</w:footnote>") {
+            let absolute_end = absolute_start + end_idx + "</w:footnote>".len();
+            let footnote_chunk = &xml[absolute_start..absolute_end];
+            
+            if let Some(id) = extract_footnote_id(footnote_chunk) {
+                if seen_ids.insert(id) {
+                    result.push_str(footnote_chunk);
+                }
+            } else {
+                result.push_str(footnote_chunk);
+            }
+            pos = absolute_end;
+        } else {
+            break;
+        }
+    }
+    result.push_str(&xml[pos..]);
+    result
+}
+
+fn extract_footnote_id(chunk: &str) -> Option<String> {
+    let tag_end = chunk.find('>')?;
+    let tag_attrs = &chunk[..tag_end];
+    if let Some(id_start) = tag_attrs.find("w:id=\"") {
+        let val_start = id_start + "w:id=\"".len();
+        if let Some(id_end) = tag_attrs[val_start..].find('"') {
+            return Some(tag_attrs[val_start..val_start + id_end].to_string());
         }
     }
     None

@@ -205,6 +205,14 @@ fn main() -> Result<()> {
 
     let mut xml_docx = docx.build();
 
+    // 脚注XMLの重複登録を排除する
+    if !xml_docx.footnotes.is_empty() {
+        if let Ok(footnotes_str) = std::str::from_utf8(&xml_docx.footnotes) {
+            let processed = converter::deduplicate_footnotes(footnotes_str);
+            xml_docx.footnotes = processed.into_bytes();
+        }
+    }
+
     // 行番号が有効な場合、document.xml の <w:sectPr> に <w:lnNumType> を注入する
     if config.line_numbers.enabled {
         let ln_xml = format!(

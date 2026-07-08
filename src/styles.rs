@@ -484,6 +484,11 @@ pub fn setup_document_styles(docx: Docx, config: &Config, css_rules: Option<&Css
         apply_css_to_heading(&mut heading5_style, css.h5.as_ref(), "h5");
     }
 
+    // --- 脚注の参照スタイル定義 ---
+    let mut footnote_ref_style = Style::new("FootnoteReference", StyleType::Character)
+        .name("footnote reference");
+    footnote_ref_style.run_property = footnote_ref_style.run_property.vert_align(VertAlignType::SuperScript);
+
     let mut docx = docx
         .add_style(normal_style)
         .add_style(title_style)
@@ -494,6 +499,7 @@ pub fn setup_document_styles(docx: Docx, config: &Config, css_rules: Option<&Css
         .add_style(heading4_style)
         .add_style(heading5_style)
         .add_style(bullet_style)
+        .add_style(footnote_ref_style)
         .add_abstract_numbering(abstract_numbering)
         .add_abstract_numbering(bullet_abstract)
         .add_abstract_numbering(footnote_abstract)
